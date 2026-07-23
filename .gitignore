@@ -4,8 +4,5 @@
 # VS Code
 .vscode/
 
-# Firebase Config
-assets/js/firebase-config.js
-
 # Node
 node_modules/
