@@ -1,21 +1,72 @@
 import { APARTMENT_STATUSES, USER_ROLES } from "../config/constants.js";
 import {
+  compareDateAsc,
   compareTextAsc,
   escapeHtml,
   formatCurrency,
   formatDate,
   formatMonthYear,
   getApartmentResidentName,
-  getApartmentStatusBadge,
   getPaymentMethodLabel,
   getPaymentStatusMeta,
+  sumBy,
 } from "../utils/helpers.js";
 import { emptyState, renderResetPageButton } from "./layout.js";
 
+function getAssignedServiceNames(apartment, services) {
+  const servicesMap = Object.fromEntries(services.map((service) => [service.id, service]));
+
+  if (Array.isArray(apartment.assignedServiceIds)) {
+    return apartment.assignedServiceIds
+      .map((serviceId) => servicesMap[serviceId]?.name)
+      .filter(Boolean);
+  }
+
+  return services.filter((service) => service.isActive !== false).map((service) => service.name);
+}
+
+function sortChargesDesc(charges) {
+  return [...charges].sort((firstCharge, secondCharge) => {
+    if (Number(secondCharge.year) !== Number(firstCharge.year)) {
+      return Number(secondCharge.year) - Number(firstCharge.year);
+    }
+
+    return Number(secondCharge.month) - Number(firstCharge.month);
+  });
+}
+
+export function buildApartmentSummaryText(apartment, residents, charges, services = []) {
+  const assignedServices = getAssignedServiceNames(apartment, services);
+  const latestCharge = sortChargesDesc(charges)[0];
+  const latestStatus = latestCharge ? getPaymentStatusMeta(latestCharge.status).label : "لا توجد سجلات تحصيل بعد";
+
+  return [
+    `ملخص الشقة ${apartment.apartmentNumber}`,
+    `اسم الساكن: ${getApartmentResidentName(apartment) || "-"}`,
+    `الدور: ${apartment.floor || "-"}`,
+    `رقم الموبايل: ${apartment.phone || "-"}`,
+    `الحالة: ${APARTMENT_STATUSES.find((item) => item.value === apartment.status)?.label || "-"}`,
+    `عدد السكان المرتبطين: ${residents.length}`,
+    `الخدمات المطلوبة: ${assignedServices.length ? assignedServices.join(" - ") : "غير محددة"}`,
+    `آخر حالة سداد: ${latestStatus}`,
+    latestCharge ? `آخر فترة مسجلة: ${formatMonthYear(latestCharge.month, latestCharge.year)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function renderApartmentsSection(state) {
+  const filters = state.filters.apartments || {};
   const apartments = state.data.apartments
     .filter((item) => !item.isArchived)
+    .filter((item) => {
+      const floorMatch = !filters.floor || String(item.floor || "") === String(filters.floor);
+      const statusMatch = !filters.status || item.status === filters.status;
+      return floorMatch && statusMatch;
+    })
     .sort((firstApartment, secondApartment) => compareTextAsc(firstApartment.apartmentNumber, secondApartment.apartmentNumber));
+  const floors = [...new Set(state.data.apartments.filter((item) => !item.isArchived).map((item) => String(item.floor || "").trim()).filter(Boolean))]
+    .sort(compareTextAsc);
   const residentsCount = state.data.residents.reduce((map, resident) => {
     map[resident.apartmentId] = (map[resident.apartmentId] || 0) + 1;
     return map;
@@ -40,6 +91,23 @@ export function renderApartmentsSection(state) {
             : ""
         }
       </div>
+
+      <form id="apartments-filter-form" class="section-filters">
+        <select class="form-select" name="floor" style="max-width: 220px;">
+          <option value="">كل الأدوار</option>
+          ${floors
+            .map((floor) => `<option value="${escapeHtml(floor)}" ${String(filters.floor || "") === floor ? "selected" : ""}>الدور ${escapeHtml(floor)}</option>`)
+            .join("")}
+        </select>
+        <select class="form-select" name="status" style="max-width: 220px;">
+          <option value="">كل الحالات</option>
+          ${APARTMENT_STATUSES.map(
+            (status) =>
+              `<option value="${status.value}" ${filters.status === status.value ? "selected" : ""}>${status.label}</option>`,
+          ).join("")}
+        </select>
+        <button class="btn btn-outline-primary" type="submit">تطبيق</button>
+      </form>
 
       ${
         apartments.length
@@ -93,10 +161,62 @@ export function renderApartmentsSection(state) {
                 </tbody>
               </table>
             </div>`
-          : emptyState("لا توجد شقق مضافة حتى الآن.")
+          : emptyState("لا توجد شقق مطابقة للفلاتر الحالية.")
       }
     </section>
   `;
+}
+
+export function renderMyApartmentSection(state) {
+  const apartment = state.data.apartments.find((item) => item.id === state.user?.apartmentId && !item.isArchived);
+
+  if (!apartment) {
+    return `
+      <section class="section-card">
+        <div class="section-card__header">
+          <div>
+            <h2 class="h5 mb-1">بيانات شقتي</h2>
+            <p class="text-muted mb-0">كل ما يخص الشقة المرتبطة بحسابك</p>
+          </div>
+        </div>
+        ${emptyState("لم يتم ربط هذا الحساب بأي شقة حتى الآن. تواصل مع الأدمن لإكمال الربط.")}
+      </section>
+    `;
+  }
+
+  const residents = state.data.residents.filter((item) => item.apartmentId === apartment.id);
+  const charges = state.data.monthlyCharges.filter((item) => item.apartmentId === apartment.id);
+  const payments = state.data.payments.filter((item) => item.apartmentId === apartment.id);
+  const attachments = state.data.attachments.filter(
+    (item) =>
+      item.relatedId === apartment.id ||
+      charges.some((charge) => charge.id === item.relatedId) ||
+      payments.some((payment) => payment.id === item.relatedId),
+  );
+
+  return `
+    <section class="section-card">
+      <div class="section-card__header">
+        <div>
+          <h2 class="h5 mb-1">بيانات شقتي</h2>
+          <p class="text-muted mb-0">تفاصيل الشقة والخدمات المطلوبة وسجل السداد الشهري</p>
+        </div>
+      </div>
+      ${getApartmentDetails(apartment, residents, charges, payments, attachments, state.data.services, false)}
+    </section>
+  `;
+}
+
+function getApartmentStatusBadge(status) {
+  const meta = APARTMENT_STATUSES.find((item) => item.value === status) || APARTMENT_STATUSES[0];
+  const className =
+    status === "occupied"
+      ? "status-dot--occupied"
+      : status === "vacant"
+        ? "status-dot--vacant"
+        : "status-dot--finishing";
+
+  return `<span class="status-dot ${className}"></span>${meta.label}`;
 }
 
 export function getApartmentForm(apartment = null, services = []) {
@@ -183,21 +303,27 @@ export function getApartmentForm(apartment = null, services = []) {
   `;
 }
 
-export function getApartmentDetails(apartment, residents, charges, payments, attachments, services = []) {
-  const sortedCharges = [...charges].sort((a, b) => {
-    if (b.year !== a.year) {
-      return b.year - a.year;
-    }
-    return b.month - a.month;
-  });
-  const servicesMap = Object.fromEntries(services.map((service) => [service.id, service]));
-  const assignedServiceNames = Array.isArray(apartment.assignedServiceIds)
-    ? apartment.assignedServiceIds
-        .map((serviceId) => servicesMap[serviceId]?.name)
-        .filter(Boolean)
-    : services.filter((service) => service.isActive !== false).map((service) => service.name);
+export function getApartmentDetails(apartment, residents, charges, payments, attachments, services = [], canManage = false) {
+  const sortedCharges = sortChargesDesc(charges);
+  const sortedResidents = [...residents].sort((firstResident, secondResident) => compareTextAsc(firstResident.name, secondResident.name));
+  const assignedServiceNames = getAssignedServiceNames(apartment, services);
 
   return `
+    ${
+      canManage
+        ? `<div class="detail-actions">
+            <button class="btn btn-outline-primary" data-action="apartment-copy-summary" data-id="${apartment.id}">
+              <i class="fa-solid fa-copy"></i>
+              نسخ ملخص الشقة
+            </button>
+            <button class="btn btn-outline-primary" data-action="apartment-print-statement" data-id="${apartment.id}">
+              <i class="fa-solid fa-file-pdf"></i>
+              طباعة كشف الشقة PDF
+            </button>
+          </div>`
+        : ""
+    }
+
     <div class="summary-strip">
       <div class="summary-chip">
         <small>رقم الشقة</small>
@@ -222,7 +348,7 @@ export function getApartmentDetails(apartment, residents, charges, payments, att
 
     <h3 class="h6 mb-3">السكان المرتبطون بالشقة</h3>
     ${
-      residents.length
+      sortedResidents.length
         ? `<div class="table-responsive mb-4">
             <table class="table table-sm">
               <thead>
@@ -234,7 +360,7 @@ export function getApartmentDetails(apartment, residents, charges, payments, att
                 </tr>
               </thead>
               <tbody>
-                ${residents
+                ${sortedResidents
                   .map(
                     (resident) => `
                       <tr>
@@ -259,7 +385,9 @@ export function getApartmentDetails(apartment, residents, charges, payments, att
             ${sortedCharges
               .map((charge, index) => {
                 const status = getPaymentStatusMeta(charge.status);
-                const relatedPayments = payments.filter((payment) => payment.monthlyChargeId === charge.id);
+                const relatedPayments = payments
+                  .filter((payment) => payment.monthlyChargeId === charge.id)
+                  .sort((firstPayment, secondPayment) => compareDateAsc(secondPayment.paymentDate, firstPayment.paymentDate));
                 const relatedAttachments = attachments.filter(
                   (item) => item.relatedId === charge.id || relatedPayments.some((payment) => payment.id === item.relatedId),
                 );
@@ -376,5 +504,245 @@ export function getApartmentDetails(apartment, residents, charges, payments, att
           </div>`
         : emptyState("لا توجد سجلات شهرية لهذه الشقة بعد.")
     }
+  `;
+}
+
+export function getApartmentStatementPrintDocument(apartment, residents, charges, payments, services = []) {
+  const assignedServiceNames = getAssignedServiceNames(apartment, services);
+  const totalDue = sumBy(charges, (charge) => charge.totalAmount);
+  const totalPaid = sumBy(charges, (charge) => charge.paidAmount);
+  const totalRemaining = sumBy(charges, (charge) => charge.remainingAmount);
+  const sortedCharges = sortChargesDesc(charges);
+
+  const residentsRows = residents.length
+    ? [...residents]
+        .sort((firstResident, secondResident) => compareTextAsc(firstResident.name, secondResident.name))
+        .map(
+          (resident) => `
+            <tr>
+              <td>${escapeHtml(resident.name)}</td>
+              <td>${escapeHtml(resident.whatsapp || "-")}</td>
+              <td>${resident.hasCar ? "نعم" : "لا"}</td>
+              <td>${resident.hasCar ? `${escapeHtml(resident.carType || "-")} - ${escapeHtml(resident.carNumber || "-")}` : "-"}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4" class="print-empty">لا يوجد سكان مرتبطون بهذه الشقة.</td></tr>`;
+
+  const chargesRows = sortedCharges.length
+    ? sortedCharges
+        .map((charge) => {
+          const chargePayments = payments
+            .filter((payment) => payment.monthlyChargeId === charge.id)
+            .sort((firstPayment, secondPayment) => compareDateAsc(firstPayment.paymentDate, secondPayment.paymentDate));
+
+          return `
+            <tr>
+              <td>${formatMonthYear(charge.month, charge.year)}</td>
+              <td>${getPaymentStatusMeta(charge.status).label}</td>
+              <td>${formatCurrency(charge.totalAmount)}</td>
+              <td>${formatCurrency(charge.paidAmount)}</td>
+              <td>${formatCurrency(charge.remainingAmount)}</td>
+              <td>${chargePayments.length ? chargePayments.map((payment) => `${formatDate(payment.paymentDate)} - ${formatCurrency(payment.amount)}`).join("<br />") : "-"}</td>
+            </tr>
+          `;
+        })
+        .join("")
+    : `<tr><td colspan="6" class="print-empty">لا توجد سجلات تحصيل لهذه الشقة.</td></tr>`;
+
+  return `
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>كشف الشقة ${escapeHtml(apartment.apartmentNumber)}</title>
+        <style>
+          :root {
+            --color-dark: #0b0909;
+            --color-green-dark: #2e4540;
+            --color-border: #dbe4e0;
+            --color-surface: #f7faf9;
+            --color-text: #1d2524;
+            --color-muted: #68726f;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            padding: 28px;
+            font-family: Tahoma, "Segoe UI", sans-serif;
+            color: var(--color-text);
+            background: #ffffff;
+          }
+          .print-card {
+            max-width: 1020px;
+            margin: 0 auto;
+            border: 1px solid var(--color-border);
+            border-radius: 20px;
+            padding: 28px;
+            background: #fff;
+          }
+          .print-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 24px;
+            margin-bottom: 24px;
+            padding-bottom: 18px;
+            border-bottom: 1px solid var(--color-border);
+          }
+          .print-title {
+            margin: 0;
+            font-size: 1.8rem;
+            color: var(--color-dark);
+          }
+          .print-subtitle {
+            margin: 8px 0 0;
+            color: var(--color-muted);
+          }
+          .print-summary {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+            margin-bottom: 20px;
+          }
+          .print-summary__item {
+            padding: 16px;
+            border-radius: 16px;
+            border: 1px solid var(--color-border);
+            background: var(--color-surface);
+          }
+          .print-summary__label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--color-muted);
+            font-size: 0.92rem;
+          }
+          .print-summary__value {
+            font-weight: 700;
+            font-size: 1.12rem;
+          }
+          .print-section {
+            margin-top: 24px;
+          }
+          .print-section h2 {
+            margin: 0 0 12px;
+            font-size: 1.05rem;
+            color: var(--color-green-dark);
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+          th,
+          td {
+            padding: 12px 14px;
+            border: 1px solid var(--color-border);
+            text-align: right;
+            vertical-align: top;
+          }
+          th {
+            background: #f0f5f3;
+            color: var(--color-green-dark);
+          }
+          .print-empty {
+            text-align: center;
+            color: var(--color-muted);
+          }
+          .print-note {
+            padding: 16px;
+            border-radius: 16px;
+            border: 1px solid var(--color-border);
+            background: var(--color-surface);
+          }
+          .print-footer {
+            margin-top: 28px;
+            padding-top: 16px;
+            border-top: 1px solid var(--color-border);
+            color: var(--color-muted);
+            font-size: 0.94rem;
+          }
+          @media print {
+            body { padding: 0; }
+            .print-card {
+              border: 0;
+              border-radius: 0;
+              padding: 0;
+            }
+          }
+        </style>
+      </head>
+      <body onload="window.print(); window.onafterprint = () => window.close();">
+        <main class="print-card">
+          <header class="print-header">
+            <div>
+              <h1 class="print-title">كشف الشقة ${escapeHtml(apartment.apartmentNumber)}</h1>
+              <p class="print-subtitle">ملخص بيانات الساكن وسجل التحصيل الشهري</p>
+            </div>
+            <div class="print-note">
+              <strong>اسم الساكن:</strong> ${escapeHtml(getApartmentResidentName(apartment) || "-")}<br />
+              <strong>الدور:</strong> ${escapeHtml(apartment.floor || "-")}<br />
+              <strong>رقم الموبايل:</strong> ${escapeHtml(apartment.phone || "-")}
+            </div>
+          </header>
+
+          <section class="print-summary">
+            <div class="print-summary__item">
+              <span class="print-summary__label">إجمالي المطلوب</span>
+              <div class="print-summary__value">${formatCurrency(totalDue)}</div>
+            </div>
+            <div class="print-summary__item">
+              <span class="print-summary__label">إجمالي المدفوع</span>
+              <div class="print-summary__value">${formatCurrency(totalPaid)}</div>
+            </div>
+            <div class="print-summary__item">
+              <span class="print-summary__label">إجمالي المتبقي</span>
+              <div class="print-summary__value">${formatCurrency(totalRemaining)}</div>
+            </div>
+            <div class="print-summary__item">
+              <span class="print-summary__label">الخدمات المطلوبة</span>
+              <div class="print-summary__value">${escapeHtml(assignedServiceNames.join(" - ") || "غير محددة")}</div>
+            </div>
+          </section>
+
+          <section class="print-section">
+            <h2>السكان المرتبطون</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>الاسم</th>
+                  <th>واتساب</th>
+                  <th>سيارة</th>
+                  <th>بيانات السيارة</th>
+                </tr>
+              </thead>
+              <tbody>${residentsRows}</tbody>
+            </table>
+          </section>
+
+          <section class="print-section">
+            <h2>سجل التحصيل الشهري</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>الفترة</th>
+                  <th>الحالة</th>
+                  <th>المطلوب</th>
+                  <th>المدفوع</th>
+                  <th>المتبقي</th>
+                  <th>الدفعات المسجلة</th>
+                </tr>
+              </thead>
+              <tbody>${chargesRows}</tbody>
+            </table>
+          </section>
+
+          <footer class="print-footer">
+            تم إنشاء هذا الكشف من نظام إدارة البرج لتسهيل مشاركة بيانات الشقة مع الساكن أو المالك.
+          </footer>
+        </main>
+      </body>
+    </html>
   `;
 }

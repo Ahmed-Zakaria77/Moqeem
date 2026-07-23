@@ -6,12 +6,41 @@ import {
   formatDate,
   formatMonthYear,
   getApartmentResidentName,
+  getAvailableYears,
   getCurrentMonthYear,
   getPaymentMethodLabel,
   getPaymentStatusMeta,
+  sumBy,
   toInputDate,
 } from "../utils/helpers.js";
 import { emptyState, renderResetPageButton } from "./layout.js";
+
+export function buildChargeSummaryText(charge, payments, apartment = null) {
+  const status = getPaymentStatusMeta(charge.status).label;
+  const residentName = getApartmentResidentName(apartment) || "-";
+  const paymentLines = payments.length
+    ? payments
+        .map(
+          (payment) =>
+            `- ${formatDate(payment.paymentDate)} | ${formatCurrency(payment.amount)} | ${getPaymentMethodLabel(payment.paymentMethod)}`,
+        )
+        .join("\n")
+    : "- لا توجد دفعات مسجلة";
+
+  return [
+    `بيانات سداد الشقة ${charge.apartmentNumber}`,
+    `اسم الساكن: ${residentName}`,
+    `الفترة: ${formatMonthYear(charge.month, charge.year)}`,
+    `الحالة: ${status}`,
+    `إجمالي المطلوب: ${formatCurrency(charge.totalAmount)}`,
+    `إجمالي المدفوع: ${formatCurrency(charge.paidAmount)}`,
+    `المتبقي: ${formatCurrency(charge.remainingAmount)}`,
+    "الخدمات المطلوبة:",
+    ...(charge.services || []).map((service) => `- ${service.name}: ${formatCurrency(service.amount)}`),
+    "الدفعات المسجلة:",
+    paymentLines,
+  ].join("\n");
+}
 
 export function renderChargesSection(state) {
   const filters = state.filters.charges;
@@ -19,12 +48,20 @@ export function renderChargesSection(state) {
   const month = Number(filters?.month || current.month);
   const year = Number(filters?.year || current.year);
   const statusFilter = filters?.status || "";
+  const availableYears = Array.from(new Set([current.year, ...getAvailableYears(state.data.monthlyCharges, (item) => item.year)])).sort(
+    (firstYear, secondYear) => firstYear - secondYear,
+  );
 
-  const charges = state.data.monthlyCharges.filter((item) => {
-    const monthMatch = Number(item.month) === month && Number(item.year) === year;
-    const statusMatch = !statusFilter || item.status === statusFilter;
-    return monthMatch && statusMatch;
-  }).sort((firstCharge, secondCharge) => compareTextAsc(firstCharge.apartmentNumber, secondCharge.apartmentNumber));
+  const charges = state.data.monthlyCharges
+    .filter((item) => {
+      const monthMatch = Number(item.month) === month && Number(item.year) === year;
+      const statusMatch = !statusFilter || item.status === statusFilter;
+      return monthMatch && statusMatch;
+    })
+    .sort((firstCharge, secondCharge) => compareTextAsc(firstCharge.apartmentNumber, secondCharge.apartmentNumber));
+  const totalDue = sumBy(charges, (item) => item.totalAmount);
+  const totalPaid = sumBy(charges, (item) => item.paidAmount);
+  const totalRemaining = sumBy(charges, (item) => item.remainingAmount);
 
   return `
     <section class="section-card">
@@ -52,7 +89,9 @@ export function renderChargesSection(state) {
             (label, index) => `<option value="${index + 1}" ${month === index + 1 ? "selected" : ""}>${label}</option>`,
           ).join("")}
         </select>
-        <input class="form-control" name="year" type="number" min="2024" value="${year}" style="max-width: 160px;" />
+        <select class="form-select" name="year" style="max-width: 180px;">
+          ${availableYears.map((optionYear) => `<option value="${optionYear}" ${year === optionYear ? "selected" : ""}>${optionYear}</option>`).join("")}
+        </select>
         <select class="form-select" name="status" style="max-width: 220px;">
           <option value="">كل الحالات</option>
           ${Object.entries(PAYMENT_STATUS_LABELS)
@@ -61,6 +100,25 @@ export function renderChargesSection(state) {
         </select>
         <button class="btn btn-outline-primary" type="submit">تطبيق</button>
       </form>
+
+      <div class="summary-strip">
+        <div class="summary-chip">
+          <small>الفترة المحددة</small>
+          <strong>${formatMonthYear(month, year)}</strong>
+        </div>
+        <div class="summary-chip">
+          <small>إجمالي المطلوب</small>
+          <strong>${formatCurrency(totalDue)}</strong>
+        </div>
+        <div class="summary-chip">
+          <small>إجمالي المدفوع</small>
+          <strong>${formatCurrency(totalPaid)}</strong>
+        </div>
+        <div class="summary-chip">
+          <small>إجمالي المتبقي</small>
+          <strong>${formatCurrency(totalRemaining)}</strong>
+        </div>
+      </div>
 
       ${
         charges.length
@@ -223,14 +281,18 @@ export function getPaymentForm(charge) {
   `;
 }
 
-export function getChargeDetails(charge, payments, attachments, apartment = null, canPrint = false) {
+export function getChargeDetails(charge, payments, attachments, apartment = null, canManage = false) {
   const status = getPaymentStatusMeta(charge.status);
   const residentName = getApartmentResidentName(apartment) || "-";
 
   return `
     ${
-      canPrint
-        ? `<div class="d-flex justify-content-end mb-3">
+      canManage
+        ? `<div class="detail-actions">
+            <button class="btn btn-outline-primary" data-action="charge-copy-summary" data-id="${charge.id}">
+              <i class="fa-solid fa-copy"></i>
+              نسخ بيانات السداد
+            </button>
             <button class="btn btn-outline-primary" data-action="charge-print" data-id="${charge.id}">
               <i class="fa-solid fa-file-pdf"></i>
               طباعة PDF
@@ -238,6 +300,7 @@ export function getChargeDetails(charge, payments, attachments, apartment = null
           </div>`
         : ""
     }
+
     <div class="summary-strip">
       <div class="summary-chip">
         <small>الشقة</small>
@@ -519,61 +582,37 @@ export function getChargePrintDocument(charge, payments, attachments, apartment 
               padding: 0;
             }
           }
-          @media (max-width: 720px) {
-            body { padding: 16px; }
-            .print-summary {
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-            .print-header {
-              flex-direction: column;
-              align-items: stretch;
-            }
-          }
         </style>
       </head>
-      <body>
+      <body onload="window.print(); window.onafterprint = () => window.close();">
         <main class="print-card">
           <header class="print-header">
             <div>
-              <h1 class="print-title">بطاقة تحصيل شهرية</h1>
-              <p class="print-subtitle">ملخص السداد الخاص بالشقة ${escapeHtml(charge.apartmentNumber)} لفترة ${escapeHtml(formatMonthYear(charge.month, charge.year))}</p>
+              <h1 class="print-title">بطاقة تحصيل الشقة ${escapeHtml(charge.apartmentNumber)}</h1>
+              <p class="print-subtitle">تفاصيل السداد عن ${formatMonthYear(charge.month, charge.year)}</p>
             </div>
-            <div class="print-badge">${escapeHtml(status.label)}</div>
+            <div class="print-badge">${status.label}</div>
           </header>
+
           <section class="print-summary">
-            <div class="print-summary__item">
-              <span class="print-summary__label">رقم الشقة</span>
-              <div class="print-summary__value">${escapeHtml(charge.apartmentNumber)}</div>
-            </div>
             <div class="print-summary__item">
               <span class="print-summary__label">اسم الساكن</span>
               <div class="print-summary__value">${escapeHtml(residentName)}</div>
             </div>
             <div class="print-summary__item">
-              <span class="print-summary__label">الفترة</span>
-              <div class="print-summary__value">${escapeHtml(formatMonthYear(charge.month, charge.year))}</div>
+              <span class="print-summary__label">إجمالي المطلوب</span>
+              <div class="print-summary__value">${formatCurrency(charge.totalAmount)}</div>
             </div>
             <div class="print-summary__item">
-              <span class="print-summary__label">آخر دفعة</span>
-              <div class="print-summary__value">${escapeHtml(formatDate(charge.lastPaymentDate))}</div>
-            </div>
-            <div class="print-summary__item">
-              <span class="print-summary__label">المطلوب</span>
-              <div class="print-summary__value">${escapeHtml(formatCurrency(charge.totalAmount))}</div>
-            </div>
-            <div class="print-summary__item">
-              <span class="print-summary__label">المدفوع</span>
-              <div class="print-summary__value">${escapeHtml(formatCurrency(charge.paidAmount))}</div>
+              <span class="print-summary__label">إجمالي المدفوع</span>
+              <div class="print-summary__value">${formatCurrency(charge.paidAmount)}</div>
             </div>
             <div class="print-summary__item">
               <span class="print-summary__label">المتبقي</span>
-              <div class="print-summary__value">${escapeHtml(formatCurrency(charge.remainingAmount))}</div>
-            </div>
-            <div class="print-summary__item">
-              <span class="print-summary__label">ملاحظات</span>
-              <div class="print-summary__value">${escapeHtml(charge.notes || "-")}</div>
+              <div class="print-summary__value">${formatCurrency(charge.remainingAmount)}</div>
             </div>
           </section>
+
           <section class="print-section">
             <h2>الخدمات المطلوبة</h2>
             <table>
@@ -586,6 +625,7 @@ export function getChargePrintDocument(charge, payments, attachments, apartment 
               <tbody>${servicesRows}</tbody>
             </table>
           </section>
+
           <section class="print-section">
             <h2>الدفعات المسجلة</h2>
             <table>
@@ -601,12 +641,13 @@ export function getChargePrintDocument(charge, payments, attachments, apartment 
               <tbody>${paymentsRows}</tbody>
             </table>
           </section>
+
           <section class="print-section">
             <h2>المرفقات</h2>
             <table>
               <thead>
                 <tr>
-                  <th>اسم المرفق</th>
+                  <th>الاسم</th>
                   <th>النوع</th>
                   <th>الرابط</th>
                 </tr>
@@ -614,15 +655,11 @@ export function getChargePrintDocument(charge, payments, attachments, apartment 
               <tbody>${attachmentsRows}</tbody>
             </table>
           </section>
+
           <footer class="print-footer">
-            تم إنشاء هذه البطاقة من نظام مُـقيـم لتسهيل حفظ فاتورة الدفع وطباعتها .
+            تم إنشاء هذه البطاقة من نظام إدارة البرج لمشاركة حالة السداد مع الساكن أو المالك عند الحاجة.
           </footer>
         </main>
-        <script>
-          window.addEventListener("load", function () {
-            window.print();
-          });
-        </script>
       </body>
     </html>
   `;

@@ -1,5 +1,13 @@
 import { USER_ROLES } from "../config/constants.js";
-import { formatCurrency, formatMonthYear, getCurrentMonthYear, getPaymentStatusMeta, sumBy, toNumber } from "../utils/helpers.js";
+import {
+  formatCurrency,
+  formatMonthYear,
+  getApartmentResidentName,
+  getCurrentMonthYear,
+  getPaymentStatusMeta,
+  sumBy,
+  toNumber,
+} from "../utils/helpers.js";
 import { emptyState } from "./layout.js";
 
 function getCurrentMonthStats(data) {
@@ -17,8 +25,22 @@ function getCurrentMonthStats(data) {
 
   const totalCollected = sumBy(currentPayments, (item) => item.amount);
   const totalExpenses = sumBy(currentExpenses, (item) => item.amount);
+  const totalDue = sumBy(currentCharges, (item) => item.totalAmount);
+  const totalCollectedFromCharges = sumBy(currentCharges, (item) => item.paidAmount);
+  const overdueAmount = sumBy(
+    currentCharges.filter((item) => ["late", "partial_late"].includes(item.status)),
+    (item) => item.remainingAmount,
+  );
   const currentBalance =
     toNumber(data.settings.openingBalance) + sumBy(data.payments, (item) => item.amount) - sumBy(data.expenses, (item) => item.amount);
+  const overdueApartmentsCount = new Set(
+    currentCharges
+      .filter((item) => ["late", "partial_late"].includes(item.status))
+      .map((item) => item.apartmentId),
+  ).size;
+  const apartmentsWithoutServices = activeApartments.filter(
+    (item) => Array.isArray(item.assignedServiceIds) && item.assignedServiceIds.length === 0,
+  );
 
   return {
     activeApartments,
@@ -27,8 +49,47 @@ function getCurrentMonthStats(data) {
     currentExpenses,
     totalCollected,
     totalExpenses,
+    totalDue,
+    totalCollectedFromCharges,
+    overdueAmount,
     currentBalance,
+    overdueApartmentsCount,
+    apartmentsWithoutServices,
   };
+}
+
+function getDashboardAlerts(state, stats) {
+  const pendingRequestsCount = state.data.users.filter((item) => item.role === "user" && item.status === "pending").length;
+
+  return [
+    stats.overdueApartmentsCount
+      ? {
+          type: "danger",
+          title: "يوجد تأخير في السداد",
+          description: `هناك ${stats.overdueApartmentsCount} شقة عليها مبالغ متأخرة وتحتاج متابعة الآن.`,
+          link: "#charges",
+          linkLabel: "فتح التحصيل الشهري",
+        }
+      : null,
+    state.user.role === USER_ROLES.ADMIN && stats.apartmentsWithoutServices.length
+      ? {
+          type: "warning",
+          title: "شقق بدون خدمات محددة",
+          description: `يوجد ${stats.apartmentsWithoutServices.length} شقة لم يتم تحديد الخدمات المطلوبة لها بعد.`,
+          link: "#apartments",
+          linkLabel: "مراجعة الشقق",
+        }
+      : null,
+    state.user.role === USER_ROLES.ADMIN && pendingRequestsCount
+      ? {
+          type: "info",
+          title: "طلبات تسجيل جديدة",
+          description: `هناك ${pendingRequestsCount} طلب تسجيل جديد في انتظار مراجعة الأدمن.`,
+          link: "#requests",
+          linkLabel: "فتح الطلبات",
+        }
+      : null,
+  ].filter(Boolean);
 }
 
 export function renderDashboard(state) {
@@ -41,6 +102,7 @@ export function renderDashboard(state) {
   const unpaid = stats.currentCharges.filter((item) => ["unpaid", "late"].includes(item.status)).length;
   const partial = stats.currentCharges.filter((item) => ["partial", "partial_late"].includes(item.status)).length;
   const overdueCharges = data.monthlyCharges.filter((item) => ["late", "partial_late"].includes(item.status)).slice(0, 6);
+  const alerts = getDashboardAlerts(state, stats);
 
   const cards = [
     { label: "عدد الشقق", value: stats.activeApartments.length, icon: "fa-building" },
@@ -56,6 +118,26 @@ export function renderDashboard(state) {
   ];
 
   return `
+    ${
+      alerts.length
+        ? `<section class="dashboard-alerts">
+            ${alerts
+              .map(
+                (alert) => `
+                  <article class="dashboard-alert dashboard-alert--${alert.type}">
+                    <div>
+                      <h3>${alert.title}</h3>
+                      <p>${alert.description}</p>
+                    </div>
+                    <a class="btn btn-sm btn-light" href="${alert.link}">${alert.linkLabel}</a>
+                  </article>
+                `,
+              )
+              .join("")}
+          </section>`
+        : ""
+    }
+
     <div class="dashboard-grid">
       ${cards
         .map(
@@ -97,6 +179,18 @@ export function renderDashboard(state) {
           <strong>${formatMonthYear(getCurrentMonthYear().month, getCurrentMonthYear().year)}</strong>
         </div>
         <div class="summary-chip">
+          <small>إجمالي المطلوب هذا الشهر</small>
+          <strong>${formatCurrency(stats.totalDue)}</strong>
+        </div>
+        <div class="summary-chip">
+          <small>إجمالي المحصل من سجلات الشهر</small>
+          <strong>${formatCurrency(stats.totalCollectedFromCharges)}</strong>
+        </div>
+        <div class="summary-chip">
+          <small>إجمالي المتأخر هذا الشهر</small>
+          <strong>${formatCurrency(stats.overdueAmount)}</strong>
+        </div>
+        <div class="summary-chip">
           <small>عدد سجلات التحصيل</small>
           <strong>${stats.currentCharges.length}</strong>
         </div>
@@ -121,6 +215,7 @@ export function renderDashboard(state) {
                 <thead>
                   <tr>
                     <th>الشقة</th>
+                    <th>اسم الساكن</th>
                     <th>الفترة</th>
                     <th>المطلوب</th>
                     <th>المدفوع</th>
@@ -132,9 +227,12 @@ export function renderDashboard(state) {
                   ${overdueCharges
                     .map((charge) => {
                       const status = getPaymentStatusMeta(charge.status);
+                      const apartment = data.apartments.find((item) => item.id === charge.apartmentId);
+
                       return `
                         <tr>
                           <td>${charge.apartmentNumber}</td>
+                          <td>${getApartmentResidentName(apartment) || "-"}</td>
                           <td>${formatMonthYear(charge.month, charge.year)}</td>
                           <td>${formatCurrency(charge.totalAmount)}</td>
                           <td>${formatCurrency(charge.paidAmount)}</td>

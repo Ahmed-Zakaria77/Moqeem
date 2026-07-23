@@ -88,6 +88,7 @@ export const MONTHS = [
 
 export const NAV_ITEMS = [
   { route: "dashboard", label: "لوحة التحكم", icon: "fa-solid fa-chart-line" },
+  { route: "my-apartment", label: "شقتي", icon: "fa-solid fa-house-chimney-user", userOnly: true },
   { route: "requests", label: "طلبات التسجيل", icon: "fa-solid fa-user-clock", adminOnly: true },
   { route: "apartments", label: "الشقق", icon: "fa-solid fa-building-user" },
   { route: "residents", label: "السكان", icon: "fa-solid fa-people-roof" },

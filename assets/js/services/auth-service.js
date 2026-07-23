@@ -24,6 +24,7 @@ import {
   normalizeText,
   normalizeUsername,
 } from "../utils/helpers.js";
+import { getRandomAvatarPresetId } from "../ui/profile-ui.js";
 import { validateSignupPayload } from "../utils/validators.js";
 import { auth, db } from "./firebase.js";
 
@@ -72,6 +73,7 @@ export async function createPendingUserAccount(payload) {
   const username = normalizeUsername(payload.username);
   const phone = normalizePhone(payload.phone);
   const email = buildInternalEmail(username, getInternalAuthDomain());
+  const avatarPreset = getRandomAvatarPresetId();
   const usernameIndexRef = doc(db, COLLECTIONS.LOGIN_INDEX, buildLoginIndexDocId("username", username));
   const phoneIndexRef = doc(db, COLLECTIONS.LOGIN_INDEX, buildLoginIndexDocId("phone", phone));
 
@@ -93,6 +95,7 @@ export async function createPendingUserAccount(payload) {
     username,
     phone,
     email,
+    avatarPreset,
     role: USER_ROLES.USER,
     status: USER_STATUSES.PENDING,
     isActive: false,
@@ -123,6 +126,7 @@ export async function createPendingUserAccount(payload) {
     email,
     username,
     phone,
+    avatarPreset,
   };
 }
 

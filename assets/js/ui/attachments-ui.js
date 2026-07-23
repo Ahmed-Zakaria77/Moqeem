@@ -93,10 +93,20 @@ export function renderAttachmentsSection(state) {
                           <td>${formatDate(attachment.createdAt)}</td>
                           <td>${escapeHtml(attachment.uploadedByName || "-")}</td>
                           <td>
-                            <a href="${escapeHtml(attachment.attachmentUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
-                              <i class="fa-solid fa-up-right-from-square"></i>
-                              فتح المرفق
-                            </a>
+                            <div class="d-flex gap-2 flex-wrap">
+                              <a href="${escapeHtml(attachment.attachmentUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
+                                <i class="fa-solid fa-up-right-from-square"></i>
+                                فتح المرفق
+                              </a>
+                              ${
+                                state.user.role === USER_ROLES.ADMIN
+                                  ? `<button class="btn btn-sm btn-outline-secondary" data-action="attachment-copy-url" data-id="${attachment.id}">
+                                      <i class="fa-solid fa-copy"></i>
+                                      نسخ الرابط
+                                    </button>`
+                                  : ""
+                              }
+                            </div>
                           </td>
                         </tr>
                       `,

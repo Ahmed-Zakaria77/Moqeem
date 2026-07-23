@@ -27,12 +27,27 @@ import {
 } from "./services/data-service.js";
 import { isFirebaseConfigured } from "./services/firebase.js";
 import { formToObject, formatMonthYear, getCurrentMonthYear, getPaymentMethodLabel, toNumber } from "./utils/helpers.js";
-import { renderApartmentsSection, getApartmentDetails, getApartmentForm } from "./ui/apartments-ui.js";
+import {
+  buildApartmentSummaryText,
+  getApartmentDetails,
+  getApartmentForm,
+  getApartmentStatementPrintDocument,
+  renderMyApartmentSection,
+  renderApartmentsSection,
+} from "./ui/apartments-ui.js";
 import { getAttachmentForm, renderAttachmentsSection } from "./ui/attachments-ui.js";
-import { getChargeDetails, getChargePrintDocument, getGenerateChargesForm, getPaymentForm, renderChargesSection } from "./ui/charges-ui.js";
+import {
+  buildChargeSummaryText,
+  getChargeDetails,
+  getChargePrintDocument,
+  getGenerateChargesForm,
+  getPaymentForm,
+  renderChargesSection,
+} from "./ui/charges-ui.js";
 import { renderDashboard } from "./ui/dashboard-ui.js";
 import { getExpenseForm, renderExpensesSection } from "./ui/expenses-ui.js";
 import {
+  animatePageTransition,
   clearAlert,
   closeModal,
   hideGlobalLoader,
@@ -49,6 +64,7 @@ import {
 import { renderLogsSection } from "./ui/logs-ui.js";
 import { getResidentForm, renderResidentsSection } from "./ui/residents-ui.js";
 import { getApproveRequestForm, renderRequestsSection } from "./ui/requests-ui.js";
+import { AVATAR_PRESETS, getAvatarPresetById, getAvatarSettingsForm, getDefaultAvatarPresetId } from "./ui/profile-ui.js";
 import { searchApartments, renderSearchResults } from "./ui/search-ui.js";
 import { getServiceForm, renderServicesSection } from "./ui/services-ui.js";
 import { getOpeningBalanceForm, renderTreasurySection } from "./ui/treasury-ui.js";
@@ -72,10 +88,18 @@ const state = {
     settings: {},
   },
   filters: {
+    apartments: {
+      floor: "",
+      status: "",
+    },
     charges: {
       month: currentPeriod.month,
       year: currentPeriod.year,
       status: "",
+    },
+    treasury: {
+      year: currentPeriod.year,
+      month: "",
     },
   },
   modalContext: null,
@@ -95,6 +119,7 @@ const refs = {
   alerts: document.getElementById("alerts-container"),
   content: document.getElementById("content"),
   sidebarNav: document.getElementById("sidebar-nav"),
+  sidebarUserAvatar: document.getElementById("sidebar-user-avatar"),
   sidebarUserName: document.getElementById("sidebar-user-name"),
   sidebarUserRole: document.getElementById("sidebar-user-role"),
   setupAlert: document.getElementById("setup-alert"),
@@ -106,6 +131,34 @@ const refs = {
 
 function getRoleLabel(role) {
   return role === USER_ROLES.ADMIN ? "أدمن" : "مستخدم";
+}
+
+function getAvatarStorageKey(userId) {
+  return `tower-avatar-preset:${userId}`;
+}
+
+function getSavedAvatarPresetId(user) {
+  if (!user) {
+    return getDefaultAvatarPresetId();
+  }
+
+  try {
+    return localStorage.getItem(getAvatarStorageKey(user.id)) || user.avatarPreset || getDefaultAvatarPresetId();
+  } catch {
+    return user.avatarPreset || getDefaultAvatarPresetId();
+  }
+}
+
+function applySidebarAvatar(user) {
+  if (!refs.sidebarUserAvatar || !user) {
+    return;
+  }
+
+  const preset = getAvatarPresetById(getSavedAvatarPresetId(user), user.role);
+  refs.sidebarUserAvatar.className = `user-avatar user-avatar--button ${preset.className}`;
+  refs.sidebarUserAvatar.innerHTML = `<i class="${preset.icon}"></i>`;
+  refs.sidebarUserAvatar.setAttribute("aria-label", `تخصيص أيقونة الحساب. الشكل الحالي: ${preset.label}`);
+  refs.sidebarUserAvatar.setAttribute("title", `تخصيص أيقونة الحساب - ${preset.label}`);
 }
 
 function translateAppError(errorOrMessage, fallback = "حدث خطأ غير متوقع. حاول مرة أخرى.") {
@@ -233,6 +286,9 @@ function getRoute() {
   if (["logs", "requests"].includes(route) && state.user?.role !== USER_ROLES.ADMIN) {
     return "dashboard";
   }
+  if (route === "my-apartment" && state.user?.role !== USER_ROLES.USER) {
+    return "dashboard";
+  }
   return route;
 }
 
@@ -248,9 +304,11 @@ function renderCurrentRoute() {
   });
   refs.sidebarUserName.textContent = state.user.name || APP_NAME;
   refs.sidebarUserRole.textContent = getRoleLabel(state.user.role);
+  applySidebarAvatar(state.user);
 
   const renderers = {
     dashboard: renderDashboard,
+    "my-apartment": renderMyApartmentSection,
     requests: renderRequestsSection,
     apartments: renderApartmentsSection,
     residents: renderResidentsSection,
@@ -274,13 +332,9 @@ function waitForPaint() {
 }
 
 async function renderRouteWithLoader(message = "جارٍ فتح الصفحة...") {
-  await withGlobalLoader(
-    async () => {
-      renderCurrentRoute();
-      await waitForPaint();
-    },
-    { message, minDuration: 180 },
-  );
+  renderCurrentRoute();
+  animatePageTransition();
+  await waitForPaint();
 }
 
 async function refreshData({ preserveAlert = true, useLoader = true, loadingMessage = "جارٍ تحميل البيانات..." } = {}) {
@@ -341,6 +395,45 @@ function findExpense(id) {
 
 function findUser(id) {
   return state.data.users.find((item) => item.id === id);
+}
+
+function findAttachment(id) {
+  return state.data.attachments.find((item) => item.id === id);
+}
+
+async function writeTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+async function copyTextWithFeedback(text, successMessage) {
+  await writeTextToClipboard(text);
+  showMessage("success", successMessage);
+}
+
+function openAvatarSettings() {
+  if (!state.user) {
+    return;
+  }
+
+  state.modalContext = { type: "avatar-preferences" };
+  openModal({
+    title: "تخصيص أيقونة الحساب",
+    body: getAvatarSettingsForm(getSavedAvatarPresetId(state.user)),
+    size: "modal-md",
+  });
 }
 
 const PAGE_RESET_CONFIG = {
@@ -434,7 +527,15 @@ function openApartmentDetails(id) {
 
   openModal({
     title: `تفاصيل الشقة ${apartment.apartmentNumber}`,
-    body: getApartmentDetails(apartment, residents, charges, payments, attachments, state.data.services),
+    body: getApartmentDetails(
+      apartment,
+      residents,
+      charges,
+      payments,
+      attachments,
+      state.data.services,
+      state.user?.role === USER_ROLES.ADMIN,
+    ),
   });
 }
 
@@ -482,6 +583,67 @@ function printChargeCard(id) {
   printWindow.document.open();
   printWindow.document.write(getChargePrintDocument(charge, payments, attachments, apartment));
   printWindow.document.close();
+}
+
+function printApartmentStatement(id) {
+  requireAdmin();
+  const apartment = findApartment(id);
+  if (!apartment) {
+    throw new Error("تعذر العثور على الشقة.");
+  }
+
+  const residents = state.data.residents.filter((item) => item.apartmentId === apartment.id);
+  const charges = state.data.monthlyCharges.filter((item) => item.apartmentId === apartment.id);
+  const payments = state.data.payments.filter((item) => item.apartmentId === apartment.id);
+  const printWindow = window.open("", "_blank", "width=1200,height=900");
+
+  if (!printWindow) {
+    throw new Error("تعذر فتح نافذة الطباعة. تأكد من السماح بالنوافذ المنبثقة.");
+  }
+
+  printWindow.document.open();
+  printWindow.document.write(getApartmentStatementPrintDocument(apartment, residents, charges, payments, state.data.services));
+  printWindow.document.close();
+}
+
+async function copyApartmentSummary(id) {
+  requireAdmin();
+  const apartment = findApartment(id);
+  if (!apartment) {
+    throw new Error("تعذر العثور على الشقة.");
+  }
+
+  const residents = state.data.residents.filter((item) => item.apartmentId === apartment.id);
+  const charges = state.data.monthlyCharges.filter((item) => item.apartmentId === apartment.id);
+  await copyTextWithFeedback(
+    buildApartmentSummaryText(apartment, residents, charges, state.data.services),
+    "تم نسخ ملخص الشقة بنجاح.",
+  );
+}
+
+async function copyChargeSummary(id) {
+  requireAdmin();
+  const charge = findCharge(id);
+  if (!charge) {
+    throw new Error("تعذر العثور على سجل التحصيل.");
+  }
+
+  const apartment = findApartment(charge.apartmentId);
+  const payments = state.data.payments.filter((item) => item.monthlyChargeId === charge.id);
+  await copyTextWithFeedback(
+    buildChargeSummaryText(charge, payments, apartment),
+    "تم نسخ بيانات السداد بنجاح.",
+  );
+}
+
+async function copyAttachmentUrl(id) {
+  requireAdmin();
+  const attachment = findAttachment(id);
+  if (!attachment?.attachmentUrl) {
+    throw new Error("تعذر العثور على رابط المرفق.");
+  }
+
+  await copyTextWithFeedback(attachment.attachmentUrl, "تم نسخ رابط المرفق بنجاح.");
 }
 
 function openApartmentForm(apartment = null) {
@@ -679,6 +841,8 @@ async function handleAuthState(user) {
       name: profile.name,
       role: profile.role,
       email: profile.email,
+      apartmentId: profile.apartmentId || null,
+      avatarPreset: profile.avatarPreset || null,
     };
 
     if (state.user.role === USER_ROLES.ADMIN) {
@@ -874,9 +1038,33 @@ async function submitApproveRequestForm(form) {
   showMessage("success", "تم قبول الطلب وتفعيل الحساب وربطه بالشقة.");
 }
 
+async function submitAvatarPreferencesForm(form) {
+  if (!state.user) {
+    throw new Error("يجب تسجيل الدخول أولًا.");
+  }
+
+  const presetId = String(form.elements.avatarPreset?.value || "").trim();
+  if (!AVATAR_PRESETS.some((item) => item.id === presetId)) {
+    throw new Error("اختر شكلًا صحيحًا للأيقونة.");
+  }
+
+  try {
+    localStorage.setItem(getAvatarStorageKey(state.user.id), presetId);
+  } catch {
+    throw new Error("تعذر حفظ اختيار الأيقونة على هذا الجهاز.");
+  }
+
+  applySidebarAvatar(state.user);
+  closeModal();
+  showMessage("success", "تم تحديث شكل أيقونة الحساب بنجاح.");
+}
+
 async function handleActionClick(action, id, page = "") {
   try {
     switch (action) {
+      case "open-avatar-settings":
+        openAvatarSettings();
+        break;
       case "open-generate-charges":
         openGenerateChargesForm();
         break;
@@ -920,6 +1108,12 @@ async function handleActionClick(action, id, page = "") {
         openApartmentDetails(id);
         hideSearchResults();
         refs.searchInput.value = "";
+        break;
+      case "apartment-copy-summary":
+        await copyApartmentSummary(id);
+        break;
+      case "apartment-print-statement":
+        printApartmentStatement(id);
         break;
       case "apartment-delete": {
         requireAdmin();
@@ -986,6 +1180,9 @@ async function handleActionClick(action, id, page = "") {
       case "charge-view":
         openChargeDetails(id);
         break;
+      case "charge-copy-summary":
+        await copyChargeSummary(id);
+        break;
       case "charge-print":
         printChargeCard(id);
         break;
@@ -1027,6 +1224,9 @@ async function handleActionClick(action, id, page = "") {
       case "attachment-create":
         openAttachmentForm();
         break;
+      case "attachment-copy-url":
+        await copyAttachmentUrl(id);
+        break;
       default:
         break;
     }
@@ -1054,6 +1254,30 @@ async function handleDocumentSubmit(event) {
         renderCurrentRoute();
         break;
       }
+      case "apartments-filter-form": {
+        event.preventDefault();
+        const payload = formToObject(target);
+        state.filters.apartments = {
+          floor: payload.floor || "",
+          status: payload.status || "",
+        };
+        renderCurrentRoute();
+        break;
+      }
+      case "treasury-filter-form": {
+        event.preventDefault();
+        const payload = formToObject(target);
+        state.filters.treasury = {
+          year: Number(payload.year),
+          month: payload.month ? Number(payload.month) : "",
+        };
+        renderCurrentRoute();
+        break;
+      }
+      case "avatar-preferences-form":
+        event.preventDefault();
+        await submitAvatarPreferencesForm(target);
+        break;
       case "apartment-form":
         event.preventDefault();
         await submitApartmentForm(target);

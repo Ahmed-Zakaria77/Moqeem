@@ -265,6 +265,20 @@ export function uniqueBy(items, selector) {
   return [...map.values()];
 }
 
+export function getAvailableYears(items, selector) {
+  const years = new Set();
+
+  items.forEach((item) => {
+    const resolvedValue = selector(item);
+    const year = Number(resolvedValue);
+    if (Number.isFinite(year) && year > 0) {
+      years.add(year);
+    }
+  });
+
+  return [...years].sort((firstYear, secondYear) => firstYear - secondYear);
+}
+
 export function buildInternalEmail(username, domain) {
   return `${normalizeUsername(username)}@${domain}`;
 }

@@ -2,6 +2,7 @@ import { APP_NAME, NAV_ITEMS, USER_ROLES } from "../config/constants.js";
 
 export const ROUTE_META = {
   dashboard: { title: "لوحة التحكم", subtitle: "ملخص الشقق والتحصيل والمصروفات" },
+  "my-apartment": { title: "شقتي", subtitle: "تفاصيل الشقة الخاصة بك ومدفوعاتها وخدماتها الشهرية" },
   requests: { title: "طلبات التسجيل", subtitle: "مراجعة الحسابات الجديدة وقبولها أو رفضها" },
   apartments: { title: "إدارة الشقق", subtitle: "إضافة وتعديل وعرض حالة كل شقة" },
   residents: { title: "إدارة السكان", subtitle: "ربط السكان بالشقق ومتابعة بياناتهم" },
@@ -19,6 +20,8 @@ let confirmCallback = null;
 let globalLoaderElement = null;
 let globalLoaderTextElement = null;
 let globalLoaderCount = 0;
+const alertTimers = new WeakMap();
+let pageTransitionCleanupTimer = null;
 
 function wait(duration) {
   return new Promise((resolve) => {
@@ -49,7 +52,17 @@ export function initLayout() {
 export function renderSidebarNav(activeRoute, role, options = {}) {
   const pendingRequestsCount = Number(options.pendingRequestsCount || 0);
 
-  return NAV_ITEMS.filter((item) => !(item.adminOnly && role !== USER_ROLES.ADMIN))
+  return NAV_ITEMS.filter((item) => {
+    if (item.adminOnly && role !== USER_ROLES.ADMIN) {
+      return false;
+    }
+
+    if (item.userOnly && role !== USER_ROLES.USER) {
+      return false;
+    }
+
+    return true;
+  })
     .map(
       (item) => {
         const hasPendingRequests = item.route === "requests" && pendingRequestsCount > 0;
@@ -79,6 +92,35 @@ export function setPageMeta(route) {
   document.title = `${meta.title} | ${APP_NAME}`;
 }
 
+export function animatePageTransition() {
+  const contentElement = document.getElementById("content");
+  const titleElement = document.getElementById("page-title");
+  const subtitleElement = document.getElementById("page-subtitle");
+  const animatedElements = [contentElement, titleElement, subtitleElement].filter(Boolean);
+
+  if (!animatedElements.length) {
+    return;
+  }
+
+  if (pageTransitionCleanupTimer) {
+    window.clearTimeout(pageTransitionCleanupTimer);
+    pageTransitionCleanupTimer = null;
+  }
+
+  animatedElements.forEach((element) => {
+    element.classList.remove("page-transition-enter");
+    void element.offsetWidth;
+    element.classList.add("page-transition-enter");
+  });
+
+  pageTransitionCleanupTimer = window.setTimeout(() => {
+    animatedElements.forEach((element) => {
+      element.classList.remove("page-transition-enter");
+    });
+    pageTransitionCleanupTimer = null;
+  }, 340);
+}
+
 export function openModal({ title, body, size = "modal-lg" }) {
   const dialog = document.querySelector("#app-modal .modal-dialog");
   dialog.className = `modal-dialog ${size} modal-dialog-centered modal-dialog-scrollable`;
@@ -98,15 +140,50 @@ export function openConfirm(message, onConfirm) {
 }
 
 export function showAlert(container, type, message) {
+  const currentTimer = alertTimers.get(container);
+  if (currentTimer) {
+    window.clearTimeout(currentTimer);
+    alertTimers.delete(container);
+  }
+
   container.innerHTML = `
     <div class="alert alert-${type} alert-dismissible fade show shadow-sm" role="alert">
       ${message}
       <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
     </div>
   `;
+
+  const alertElement = container.querySelector(".alert");
+  if (!alertElement) {
+    return;
+  }
+
+  const dismissDelay =
+    type === "danger"
+      ? 5500
+      : type === "warning"
+        ? 5000
+        : 3500;
+
+  const timerId = window.setTimeout(() => {
+    alertElement.classList.remove("show");
+    window.setTimeout(() => {
+      if (container.contains(alertElement)) {
+        container.innerHTML = "";
+      }
+    }, 200);
+    alertTimers.delete(container);
+  }, dismissDelay);
+
+  alertTimers.set(container, timerId);
 }
 
 export function clearAlert(container) {
+  const currentTimer = alertTimers.get(container);
+  if (currentTimer) {
+    window.clearTimeout(currentTimer);
+    alertTimers.delete(container);
+  }
   container.innerHTML = "";
 }
 
@@ -122,13 +199,13 @@ export function setButtonLoading(button, isLoading) {
   button.disabled = isLoading;
 }
 
-export function showGlobalLoader(message = "جارٍ التحميل...") {
+export function showGlobalLoader() {
   if (!globalLoaderElement) {
     return;
   }
 
   globalLoaderCount += 1;
-  globalLoaderTextElement.textContent = message;
+  globalLoaderTextElement.textContent = "جاري التحميل ..";
   globalLoaderElement.classList.remove("d-none");
   globalLoaderElement.setAttribute("aria-hidden", "false");
 }
