@@ -1,0 +1,208 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUserPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function currentUserDoc() {
+      return get(currentUserPath());
+    }
+
+    function hasActiveProfile() {
+      return signedIn()
+        && exists(currentUserPath())
+        && currentUserDoc().data.isActive == true;
+    }
+
+    function isAdmin() {
+      return hasActiveProfile()
+        && currentUserDoc().data.role == 'admin';
+    }
+
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function validRole(role) {
+      return role in ['admin', 'user'];
+    }
+
+    function validMoney(value) {
+      return value is number && value >= 0;
+    }
+
+    function validUserDoc() {
+      return request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.username is string
+        && request.resource.data.phone is string
+        && validRole(request.resource.data.role)
+        && request.resource.data.status in ['pending', 'active', 'rejected']
+        && request.resource.data.isActive is bool;
+    }
+
+    function validSelfRegistrationDoc(userId) {
+      return validUserDoc()
+        && isSelf(userId)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'user'
+        && request.resource.data.status == 'pending'
+        && request.resource.data.isActive == false
+        && request.resource.data.apartmentId == null;
+    }
+
+    function validAdminManagedUserDoc() {
+      return validUserDoc()
+        && (request.resource.data.apartmentId == null || request.resource.data.apartmentId is string);
+    }
+
+    function validApartmentDoc() {
+      return request.resource.data.apartmentNumber is string
+        && request.resource.data.floor is string
+        && request.resource.data.residentName is string
+        && request.resource.data.assignedServiceIds is list
+        && request.resource.data.status in ['occupied', 'vacant', 'finishing'];
+    }
+
+    function validServiceDoc() {
+      return request.resource.data.name is string
+        && validMoney(request.resource.data.amount)
+        && request.resource.data.isFixed is bool
+        && request.resource.data.isEditable is bool
+        && request.resource.data.isActive is bool;
+    }
+
+    function validChargeDoc() {
+      return request.resource.data.apartmentId is string
+        && request.resource.data.month is int
+        && request.resource.data.year is int
+        && request.resource.data.services is list
+        && validMoney(request.resource.data.totalAmount)
+        && validMoney(request.resource.data.paidAmount)
+        && validMoney(request.resource.data.remainingAmount)
+        && request.resource.data.status in ['paid', 'partial', 'partial_late', 'unpaid', 'late'];
+    }
+
+    function validPaymentDoc() {
+      return request.resource.data.monthlyChargeId is string
+        && request.resource.data.apartmentId is string
+        && request.resource.data.createdBy is string
+        && validMoney(request.resource.data.amount)
+        && request.resource.data.amount > 0
+        && request.resource.data.paymentMethod in ['cash', 'wallet', 'instapay'];
+    }
+
+    function validExpenseDoc() {
+      return request.resource.data.title is string
+        && validMoney(request.resource.data.amount)
+        && request.resource.data.amount > 0
+        && request.resource.data.date is timestamp;
+    }
+
+    function validAttachmentDoc() {
+      return request.resource.data.relatedType in ['apartment', 'expense', 'charge', 'payment']
+        && request.resource.data.relatedId is string
+        && request.resource.data.attachmentUrl is string
+        && request.resource.data.fileName is string
+        && request.resource.data.attachmentType is string;
+    }
+
+    function validSettingsDoc() {
+      return validMoney(request.resource.data.openingBalance)
+        && request.resource.data.paymentStartDay is int
+        && request.resource.data.paymentEndDay is int
+        && request.resource.data.paymentStartDay >= 1
+        && request.resource.data.paymentStartDay <= 31
+        && request.resource.data.paymentEndDay >= request.resource.data.paymentStartDay
+        && request.resource.data.paymentEndDay <= 31;
+    }
+
+    match /loginIndex/{documentId} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.type in ['username', 'phone']
+        && request.resource.data.value is string;
+      allow update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn() && (isSelf(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if validSelfRegistrationDoc(userId) || (isAdmin() && validAdminManagedUserDoc());
+      allow update: if isAdmin() && validAdminManagedUserDoc();
+      allow delete: if false;
+    }
+
+    match /apartments/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validApartmentDoc();
+      allow delete: if isAdmin();
+    }
+
+    match /residents/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin()
+        && request.resource.data.apartmentId is string
+        && request.resource.data.name is string;
+      allow delete: if isAdmin();
+    }
+
+    match /services/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validServiceDoc();
+      allow delete: if false;
+    }
+
+    match /monthlyCharges/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validChargeDoc();
+      allow delete: if false;
+    }
+
+    match /payments/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validPaymentDoc();
+      allow delete: if false;
+    }
+
+    match /expenses/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validExpenseDoc();
+      allow delete: if false;
+    }
+
+    match /treasuryTransactions/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin()
+        && request.resource.data.type is string
+        && validMoney(request.resource.data.amount);
+      allow delete: if false;
+    }
+
+    match /attachments/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validAttachmentDoc();
+      allow delete: if false;
+    }
+
+    match /activityLogs/{documentId} {
+      allow read, create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /settings/{documentId} {
+      allow read: if hasActiveProfile();
+      allow create, update: if isAdmin() && validSettingsDoc();
+      allow delete: if false;
+    }
+  }
+}
